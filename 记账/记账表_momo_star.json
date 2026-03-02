@@ -1,0 +1,83 @@
+[
+  {
+    "date": "2026-02-28",
+    "person": "momo",
+    "type": "支出",
+    "category": "餐饮",
+    "source": "",
+    "amount": 10.0,
+    "note": "[堂食]_三立方凌空SOHO7号楼店_176187_SLFZY00013_无_无（零钱）"
+  },
+  {
+    "date": "2026-02-28",
+    "person": "momo",
+    "type": "支出",
+    "category": "餐饮",
+    "source": "",
+    "amount": 28.0,
+    "note": "上海凌空SOHO店（招商银行信用卡(5080)）"
+  },
+  {
+    "date": "2026-02-27",
+    "person": "momo",
+    "type": "支出",
+    "category": "娱乐",
+    "source": "",
+    "amount": 10.0,
+    "note": "上海市福利彩票发行中心（零钱）"
+  },
+  {
+    "date": "2026-02-26",
+    "person": "star",
+    "type": "支出",
+    "category": "购物",
+    "source": "",
+    "amount": 21.96,
+    "note": "淘宝平台商户（零钱）"
+  },
+  {
+    "date": "2026-03-01",
+    "person": "star",
+    "type": "支出",
+    "category": "宠物",
+    "source": "",
+    "amount": 7.5,
+    "note": "皇家通用猫湿粮餐包(试用装)"
+  },
+  {
+    "date": "2026-03-01",
+    "person": "momo",
+    "type": "支出",
+    "category": "宠物",
+    "source": "",
+    "amount": 7.5,
+    "note": "皇家通用猫湿粮餐包(试用装)"
+  },
+  {
+    "date": "2026-03-01",
+    "person": "momo",
+    "type": "支出",
+    "category": "交通",
+    "source": "",
+    "amount": 18.67,
+    "note": "家-丰盛商业中心 卡丢 37"
+  },
+  {
+    "date": "2026-03-01",
+    "person": "momo",
+    "type": "支出",
+    "category": "交通",
+    "source": "",
+    "amount": 13.72,
+    "note": "丰盛商业中心-家 卡丢 37"
+  },
+  {
+    "date": "2026-03-02",
+    "person": "momo",
+    "type": "支出",
+    "category": "餐饮",
+    "source": "",
+    "amount": 19.1,
+    "note": "麦当劳（招商银行储蓄卡(3615)）"
+  }
+]
