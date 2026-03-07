@@ -1,7 +1,9 @@
 // 记账_lib.js — 共享库
 // 供 记账.js / 记账-momo.js / 记账-star.js 通过 importModule("记账_lib") 使用
 
+// ---------- 常量 ----------
 const FILE_NAME = "记账数据.json"
+const XLSX_FILE = "记账表_momo_star.xlsx"
 const fm = FileManager.iCloud()
 const dir = fm.documentsDirectory()
 const filePath = fm.joinPath(dir, FILE_NAME)
@@ -15,18 +17,30 @@ const INCOME_SOURCES = [
 ]
 const PERSONS = ["momo", "star"]
 
+const AI_CONFIG = {
+  API_KEY: "d0f66a494faf4fcbb74b0200d5b4f23d.EcPiPYYdPWjzEqz3",
+  MODEL: "glm-4v-flash",
+}
+
+const XLSX_CDNS = [
+  "https://cdn.bootcdn.net/ajax/libs/xlsx/0.18.5/xlsx.full.min.js",
+  "https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js",
+  "https://cdn.jsdelivr.net/npm/xlsx@0.20.2/dist/xlsx.full.min.js",
+]
+
 // ---------- 数据读写 ----------
 function loadData() {
   if (fm.fileExists(filePath)) {
-    if (!fm.isFileDownloaded(filePath)) {
-      fm.downloadFileFromiCloud(filePath)
-    }
-    let raw = fm.readString(filePath)
-    try {
-      return JSON.parse(raw)
-    } catch (e) {
-      return []
-    }
+    if (!fm.isFileDownloaded(filePath)) fm.downloadFileFromiCloud(filePath)
+    try { return JSON.parse(fm.readString(filePath)) } catch (e) {}
+  }
+  return []
+}
+
+async function loadDataAsync() {
+  if (fm.fileExists(filePath)) {
+    if (!fm.isFileDownloaded(filePath)) await fm.downloadFileFromiCloud(filePath)
+    try { return JSON.parse(fm.readString(filePath)) } catch (e) {}
   }
   return []
 }
@@ -51,9 +65,88 @@ function monthStr() {
   return `${y}-${m}`
 }
 
-// ---------- 记账流程（person 由调用方传入，不再弹窗询问）----------
+// ---------- 通知 ----------
+async function notify(title, body) {
+  let n = new Notification()
+  n.title = title
+  n.body = body
+  n.sound = "default"
+  await n.schedule()
+}
+
+// ---------- XLSX 生成（共享）----------
+async function generateXLSX(entries, outputPath) {
+  // Sheet1：记账明细
+  let detailRows = entries.map(e => [
+    e.date.substring(0, 7),
+    e.date,
+    e.person,
+    e.type,
+    e.type === "支出" ? (e.category || "") : "",
+    e.type === "收入" ? (e.source || "") : "",
+    e.amount,
+    e.note || ""
+  ])
+
+  // Sheet2：月度汇总
+  let monthMap = {}
+  for (let e of entries) {
+    let month = e.date.substring(0, 7)
+    let key = `${month}|${e.person}`
+    if (!monthMap[key]) monthMap[key] = { month, person: e.person, expense: 0, income: 0 }
+    if (e.type === "支出") monthMap[key].expense += e.amount
+    else monthMap[key].income += e.amount
+  }
+  let summaryRows = Object.values(monthMap)
+    .sort((a, b) => a.month === b.month ? a.person.localeCompare(b.person) : a.month.localeCompare(b.month))
+    .map(r => [r.month, r.person, +r.expense.toFixed(2), +r.income.toFixed(2), +(r.income - r.expense).toFixed(2)])
+
+  let exportData = JSON.stringify({
+    dh: ["月份", "日期", "记账人", "收/支", "类目", "来源", "金额", "备注"],
+    dr: detailRows,
+    sh: ["月份", "记账人", "总支出", "总收入", "结余"],
+    sr: summaryRows
+  })
+
+  let wv = new WebView()
+  await wv.loadHTML("<!DOCTYPE html><html><head></head><body></body></html>")
+
+  let loaded = await wv.evaluateJavaScript(`
+    var cdns = ${JSON.stringify(XLSX_CDNS)}
+    var idx = 0
+    function tryNext() {
+      if (idx >= cdns.length) { completion(false); return }
+      var s = document.createElement('script')
+      s.src = cdns[idx++]
+      s.onload = function() { completion(true) }
+      s.onerror = function() { tryNext() }
+      document.head.appendChild(s)
+    }
+    tryNext()
+  `, true)
+  if (!loaded) throw new Error("无法加载 Excel 库，请检查网络")
+
+  await wv.evaluateJavaScript(`window.__d = ${exportData}; void 0`)
+
+  let base64 = await wv.evaluateJavaScript(`
+    (function() {
+      var d = window.__d
+      var wb = XLSX.utils.book_new()
+      var ws1 = XLSX.utils.aoa_to_sheet([d.dh].concat(d.dr))
+      ws1['!cols'] = [{wch:10},{wch:12},{wch:10},{wch:6},{wch:8},{wch:8},{wch:10},{wch:30}]
+      XLSX.utils.book_append_sheet(wb, ws1, "记账明细")
+      var ws2 = XLSX.utils.aoa_to_sheet([d.sh].concat(d.sr))
+      ws2['!cols'] = [{wch:10},{wch:10},{wch:12},{wch:12},{wch:12}]
+      XLSX.utils.book_append_sheet(wb, ws2, "月度汇总")
+      return XLSX.write(wb, {type:'base64', bookType:'xlsx'})
+    })()
+  `)
+
+  fm.write(outputPath, Data.fromBase64String(base64))
+}
+
+// ---------- 手动记账 ----------
 async function recordEntry(person) {
-  // 1. 收入还是支出？
   let typeAlert = new Alert()
   typeAlert.title = `${person} · 收入还是支出？`
   typeAlert.addAction("支出")
@@ -63,13 +156,11 @@ async function recordEntry(person) {
   if (tIdx === -1) return
   let type = tIdx === 0 ? "支出" : "收入"
 
-  // 2. 选择类目/来源
   let options = type === "支出" ? EXPENSE_CATEGORIES : INCOME_SOURCES
   let label = type === "支出" ? "类目" : "来源"
   let category = await pickFromTable(`选择${label}`, options)
   if (!category) return
 
-  // 3. 输入金额 + 备注
   let inputAlert = new Alert()
   inputAlert.title = "输入金额和备注"
   inputAlert.message = `${person} · ${type} · ${category}`
@@ -92,7 +183,6 @@ async function recordEntry(person) {
     return
   }
 
-  // 4. 确认
   let confirmAlert = new Alert()
   confirmAlert.title = "确认记录"
   confirmAlert.message = [
@@ -108,7 +198,6 @@ async function recordEntry(person) {
   let cIdx = await confirmAlert.presentAlert()
   if (cIdx === -1) return
 
-  // 保存
   let entry = { date: todayStr(), person, type, amount }
   if (type === "支出") entry.category = category
   else entry.source = category
@@ -125,12 +214,10 @@ async function recordEntry(person) {
   await doneAlert.presentAlert()
 }
 
-// UITable 滚动列表选择
 async function pickFromTable(title, options) {
   let table = new UITable()
   table.showSeparators = true
   let selected = null
-
   for (let opt of options) {
     let row = new UITableRow()
     row.height = 50
@@ -139,7 +226,6 @@ async function pickFromTable(title, options) {
     row.onSelect = () => { selected = opt }
     table.addRow(row)
   }
-
   await table.present()
   return selected
 }
@@ -162,7 +248,6 @@ async function showTodaySummary() {
   let totalExpense = 0, totalIncome = 0
   let personExpense = {}
   let categoryExpense = {}
-
   for (let p of PERSONS) personExpense[p] = 0
 
   for (let e of todayData) {
@@ -176,23 +261,12 @@ async function showTodaySummary() {
     }
   }
 
-  let lines = [
-    `📅 ${today}`,
-    "",
-    `总支出：¥${totalExpense.toFixed(2)}`,
-    `总收入：¥${totalIncome.toFixed(2)}`,
-    ""
-  ]
-
+  let lines = [`📅 ${today}`, "", `总支出：¥${totalExpense.toFixed(2)}`, `总收入：¥${totalIncome.toFixed(2)}`, ""]
   for (let p of PERSONS) {
-    if (personExpense[p] > 0) {
-      lines.push(`${p} 支出：¥${personExpense[p].toFixed(2)}`)
-    }
+    if (personExpense[p] > 0) lines.push(`${p} 支出：¥${personExpense[p].toFixed(2)}`)
   }
-
   if (totalExpense > 0) {
-    lines.push("")
-    lines.push("— 支出类目占比 —")
+    lines.push("", "— 支出类目占比 —")
     let sorted = Object.entries(categoryExpense).sort((a, b) => b[1] - a[1])
     for (let [cat, amt] of sorted) {
       let pct = ((amt / totalExpense) * 100).toFixed(1)
@@ -226,7 +300,6 @@ async function showMonthlySummary() {
   let personExpense = {}
   let categoryExpense = {}
   let incomeSource = {}
-
   for (let p of PERSONS) personExpense[p] = 0
 
   for (let e of monthData) {
@@ -246,41 +319,27 @@ async function showMonthlySummary() {
   let avgExpense = activePeople.length > 0 ? totalExpense / activePeople.length : 0
 
   let lines = [
-    `📅 ${month}`,
-    `共 ${monthData.length} 条记录`,
-    "",
-    `总支出：¥${totalExpense.toFixed(2)}`,
-    `总收入：¥${totalIncome.toFixed(2)}`,
-    `净收入：¥${(totalIncome - totalExpense).toFixed(2)}`,
-    ""
+    `📅 ${month}`, `共 ${monthData.length} 条记录`, "",
+    `总支出：¥${totalExpense.toFixed(2)}`, `总收入：¥${totalIncome.toFixed(2)}`,
+    `净收入：¥${(totalIncome - totalExpense).toFixed(2)}`, ""
   ]
-
   for (let p of PERSONS) {
-    if (personExpense[p] > 0) {
-      lines.push(`${p} 支出：¥${personExpense[p].toFixed(2)}`)
-    }
+    if (personExpense[p] > 0) lines.push(`${p} 支出：¥${personExpense[p].toFixed(2)}`)
   }
-  if (activePeople.length > 1) {
-    lines.push(`人均支出：¥${avgExpense.toFixed(2)}`)
-  }
+  if (activePeople.length > 1) lines.push(`人均支出：¥${avgExpense.toFixed(2)}`)
 
   if (totalExpense > 0) {
-    lines.push("")
-    lines.push("— 支出类目 —")
+    lines.push("", "— 支出类目 —")
     let sorted = Object.entries(categoryExpense).sort((a, b) => b[1] - a[1])
     for (let [cat, amt] of sorted) {
       let pct = ((amt / totalExpense) * 100).toFixed(1)
       lines.push(`${cat}：¥${amt.toFixed(2)}（${pct}%）`)
     }
   }
-
   if (totalIncome > 0) {
-    lines.push("")
-    lines.push("— 收入来源 —")
+    lines.push("", "— 收入来源 —")
     let sorted = Object.entries(incomeSource).sort((a, b) => b[1] - a[1])
-    for (let [src, amt] of sorted) {
-      lines.push(`${src}：¥${amt.toFixed(2)}`)
-    }
+    for (let [src, amt] of sorted) lines.push(`${src}：¥${amt.toFixed(2)}`)
   }
 
   let a = new Alert()
@@ -303,7 +362,6 @@ async function showRecentRecords() {
   }
 
   let recent = data.slice(-50).reverse()
-
   let table = new UITable()
   table.showSeparators = true
 
@@ -316,7 +374,6 @@ async function showRecentRecords() {
   for (let e of recent) {
     let row = new UITableRow()
     row.height = 50
-
     let catOrSrc = e.type === "支出" ? (e.category || "") : (e.source || "")
     let sign = e.type === "支出" ? "-" : "+"
     let color = e.type === "支出" ? Color.red() : Color.green()
@@ -340,7 +397,6 @@ async function showRecentRecords() {
 
     table.addRow(row)
   }
-
   await table.present()
 }
 
@@ -355,83 +411,149 @@ async function exportXLSX() {
     await a.presentAlert()
     return
   }
-
-  // Sheet1：记账明细
-  let detailRows = data.map(e => [
-    e.date.substring(0, 7),
-    e.date,
-    e.person,
-    e.type,
-    e.type === "支出" ? (e.category || "") : "",
-    e.type === "收入" ? (e.source || "") : "",
-    e.amount,
-    e.note || ""
-  ])
-
-  // Sheet2：月度汇总（按月份+记账人聚合）
-  let monthMap = {}
-  for (let e of data) {
-    let month = e.date.substring(0, 7)
-    let key = `${month}|${e.person}`
-    if (!monthMap[key]) monthMap[key] = { month, person: e.person, expense: 0, income: 0 }
-    if (e.type === "支出") monthMap[key].expense += e.amount
-    else monthMap[key].income += e.amount
-  }
-  let summaryRows = Object.values(monthMap)
-    .sort((a, b) => a.month === b.month ? a.person.localeCompare(b.person) : a.month.localeCompare(b.month))
-    .map(r => [r.month, r.person, +r.expense.toFixed(2), +r.income.toFixed(2), +(r.income - r.expense).toFixed(2)])
-
-  let exportData = JSON.stringify({
-    dh: ["月份", "日期", "记账人", "收/支", "类目", "来源", "金额", "备注"],
-    dr: detailRows,
-    sh: ["月份", "记账人", "总支出", "总收入", "结余"],
-    sr: summaryRows
-  })
-
-  let wv = new WebView()
-  await wv.loadHTML("<!DOCTYPE html><html><head></head><body></body></html>")
-
-  let loaded = await wv.evaluateJavaScript(`
-    var s = document.createElement('script')
-    s.src = 'https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js'
-    s.onload = function() { completion(true) }
-    s.onerror = function() { completion(false) }
-    document.head.appendChild(s)
-  `, true)
-
-  if (!loaded) {
-    let a = new Alert()
-    a.title = "导出失败"
-    a.message = "无法加载 Excel 生成库，请检查网络连接后重试"
-    a.addAction("好的")
-    await a.presentAlert()
-    return
-  }
-
-  await wv.evaluateJavaScript(`window.__d = ${exportData}`)
-
-  let base64 = await wv.evaluateJavaScript(`
-    (function() {
-      var d = window.__d
-      var wb = XLSX.utils.book_new()
-
-      var ws1 = XLSX.utils.aoa_to_sheet([d.dh].concat(d.dr))
-      ws1['!cols'] = [{wch:10},{wch:12},{wch:10},{wch:6},{wch:8},{wch:8},{wch:10},{wch:30}]
-      XLSX.utils.book_append_sheet(wb, ws1, "记账明细")
-
-      var ws2 = XLSX.utils.aoa_to_sheet([d.sh].concat(d.sr))
-      ws2['!cols'] = [{wch:10},{wch:10},{wch:12},{wch:12},{wch:12}]
-      XLSX.utils.book_append_sheet(wb, ws2, "月度汇总")
-
-      return XLSX.write(wb, {type: 'base64', bookType: 'xlsx'})
-    })()
-  `)
-
-  let xlsxData = Data.fromBase64String(base64)
   let fileName = `记账导出_${todayStr()}.xlsx`
   let path = fm.joinPath(fm.temporaryDirectory(), fileName)
-  fm.write(path, xlsxData)
+  await generateXLSX(data, path)
   await ShareSheet.present([path])
+}
+
+// ---------- 截图 AI 解析 ----------
+async function parseScreenshot(image) {
+  let imageData = Data.fromJPEG(image)
+  let base64Str = imageData.toBase64String()
+
+  let prompt = `你是支付截图解析助手。分析这张截图，提取消费信息，返回严格的 JSON 格式。
+
+要求：
+1. 提取金额、商家、支付方式、日期
+2. 根据商家名称智能判断消费类目
+3. 如果不是支付/收款截图，返回 {"error": "非支付截图"}
+
+类目范围：${EXPENSE_CATEGORIES.join("、")}
+收入来源：${INCOME_SOURCES.join("、")}
+
+返回格式（只返回 JSON，无其他文字）：
+{
+  "amount": 数字,
+  "type": "支出" 或 "收入",
+  "category": "类目名称",
+  "source": "支付方式（微信/支付宝/银行卡等）",
+  "note": "商家名称或交易描述",
+  "date": "YYYY-MM-DD"
+}`
+
+  let req = new Request("https://open.bigmodel.cn/api/paas/v4/chat/completions")
+  req.method = "POST"
+  req.headers = {
+    "Authorization": `Bearer ${AI_CONFIG.API_KEY}`,
+    "Content-Type": "application/json"
+  }
+  req.body = JSON.stringify({
+    model: AI_CONFIG.MODEL,
+    messages: [{
+      role: "user",
+      content: [
+        { type: "text", text: prompt },
+        { type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64Str}` } }
+      ]
+    }],
+    max_tokens: 300
+  })
+
+  let resp = await req.loadJSON()
+  if (resp.error) throw new Error(resp.error.message || "API 调用失败")
+  let text = resp.choices[0].message.content.trim()
+
+  text = text.replace(/```json\s*/g, "").replace(/```\s*/g, "")
+  let match = text.match(/\{[\s\S]*\}/)
+  if (!match) throw new Error("无法解析 AI 返回内容")
+  return JSON.parse(match[0])
+}
+
+function validateScreenshot(parsed) {
+  if (parsed.error) throw new Error(parsed.error)
+
+  let amountStr = String(parsed.amount).replace(/[¥￥元\s,+\-]/g, "")
+  let amount = parseFloat(amountStr)
+  if (isNaN(amount) || amount <= 0) throw new Error(`金额无效: ${parsed.amount}`)
+
+  let type = parsed.type === "收入" ? "收入" : "支出"
+  let category
+  if (type === "支出") {
+    category = EXPENSE_CATEGORIES.includes(parsed.category) ? parsed.category : "其他"
+  } else {
+    category = INCOME_SOURCES.includes(parsed.category) ? parsed.category : "其他"
+  }
+
+  let date = parsed.date || todayStr()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) date = todayStr()
+
+  return { amount, type, category, source: parsed.source || "", note: parsed.note || "", date }
+}
+
+// ---------- 截图记账主流程 ----------
+async function runScreenshot(person) {
+  try {
+    // 1. 获取截图
+    let image = args.images?.[0]
+    if (!image && args.shortcutParameter) {
+      let param = args.shortcutParameter
+      if (typeof param === "string") {
+        let path = decodeURIComponent(param.replace(/^file:\/\//, ""))
+        image = Image.fromFile(path)
+      } else {
+        image = param
+      }
+    }
+    if (!image) image = Pasteboard.pasteImage()
+
+    if (!image) {
+      let debug = [
+        `images: ${args.images?.length ?? "无"}`,
+        `param type: ${typeof args.shortcutParameter}`,
+        `param: ${String(args.shortcutParameter).slice(0, 100)}`,
+      ].join("\n")
+      await notify("调试信息", debug)
+      Script.complete()
+      return
+    }
+
+    // 2. AI 解析
+    let parsed = await parseScreenshot(image)
+
+    // 3. 验证
+    let validated = validateScreenshot(parsed)
+
+    // 4. 构造 entry
+    let note = validated.note || ""
+    if (validated.source) note = note ? `${note}（${validated.source}）` : validated.source
+
+    let entry = { date: validated.date, person, type: validated.type, amount: validated.amount }
+    if (validated.type === "支出") entry.category = validated.category
+    else entry.source = validated.category
+    if (note) entry.note = note
+
+    // 5. 保存 JSON（带 await 的异步读取）
+    let data = await loadDataAsync()
+    data.push(entry)
+    saveData(data)
+
+    // 6. 生成 XLSX
+    let xlsxPath = fm.joinPath(dir, XLSX_FILE)
+    await generateXLSX(data, xlsxPath)
+
+    // 7. 通知
+    let sign = entry.type === "支出" ? "-" : "+"
+    let summary = `${person} ${entry.type} ${sign}¥${entry.amount.toFixed(2)}`
+    if (entry.note) summary += `\n${entry.note}`
+    await notify("记账成功 ✓", summary)
+    Script.setShortcutOutput(summary)
+
+  } catch (err) {
+    await notify("记账失败", err.message || "未知错误")
+    Script.setShortcutOutput(`失败: ${err.message}`)
+  }
+  Script.complete()
 }
 
 // ---------- Widget ----------
@@ -443,7 +565,6 @@ async function createWidget() {
   let totalExpense = 0
   let personExpense = {}
   for (let p of PERSONS) personExpense[p] = 0
-
   for (let e of todayData) {
     if (e.type === "支出") {
       totalExpense += e.amount
@@ -458,48 +579,39 @@ async function createWidget() {
   let title = titleStack.addText("今日支出")
   title.font = Font.mediumSystemFont(13)
   title.textColor = new Color("#8e8e93")
-
   w.addSpacer(6)
 
   let amountText = w.addText(`¥${totalExpense.toFixed(2)}`)
   amountText.font = Font.boldSystemFont(28)
   amountText.textColor = totalExpense > 0 ? new Color("#ff6b6b") : Color.white()
-
   w.addSpacer(8)
 
   for (let p of PERSONS) {
     let personStack = w.addStack()
     personStack.centerAlignContent()
-
     let dot = personStack.addText("●")
     dot.font = Font.systemFont(8)
     dot.textColor = p === "momo" ? new Color("#5ac8fa") : new Color("#ff9f0a")
-
     personStack.addSpacer(4)
-
     let nameText = personStack.addText(p)
     nameText.font = Font.systemFont(13)
     nameText.textColor = new Color("#ebebf5")
-
     personStack.addSpacer(null)
-
     let pAmount = personStack.addText(`¥${personExpense[p].toFixed(2)}`)
     pAmount.font = Font.mediumSystemFont(13)
     pAmount.textColor = new Color("#ebebf5")
   }
 
   w.addSpacer(4)
-
   let dateText = w.addText(today)
   dateText.font = Font.systemFont(10)
   dateText.textColor = new Color("#636366")
-
   w.url = URLScheme.forRunningScript()
 
   return w
 }
 
-// ---------- 主流程（person-specific 脚本使用）----------
+// ---------- 主菜单 ----------
 async function runApp(person) {
   let menu = new Alert()
   menu.title = `记账 · ${person}`
@@ -524,7 +636,9 @@ async function runApp(person) {
 module.exports = {
   PERSONS, EXPENSE_CATEGORIES, INCOME_SOURCES,
   loadData, saveData, todayStr, monthStr,
+  notify, generateXLSX,
   recordEntry, pickFromTable,
   showTodaySummary, showMonthlySummary, showRecentRecords,
-  exportXLSX, createWidget, runApp
+  exportXLSX, createWidget, runApp,
+  parseScreenshot, validateScreenshot, runScreenshot,
 }
