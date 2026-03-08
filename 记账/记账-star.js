@@ -8,6 +8,8 @@ try {
   if (config.runsInWidget) {
     Script.setWidget(await lib.createWidget())
     Script.complete()
+  } else if (URLScheme.parameter("action") === "edit") {
+    await lib.editLastEntry("star")
   } else if (args.images?.length > 0 || args.shortcutParameter) {
     await lib.runScreenshot("star")
   } else {

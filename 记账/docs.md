@@ -85,7 +85,7 @@
 | 函数 | 说明 |
 |------|------|
 | `runApp(person)` | 显示主菜单（记一笔/汇总/导出） |
-| `runScreenshot(person)` | 截图记账完整流程 |
+| `runScreenshot(person)` | 截图记账完整流程（含确认编辑） |
 | `recordEntry(person)` | 手动记账弹窗流程 |
 | `showTodaySummary()` | 今日汇总弹窗 |
 | `showMonthlySummary()` | 本月汇总弹窗 |
@@ -100,6 +100,7 @@
 |------|------|
 | `parseScreenshot(image)` | 调用 GLM-4V 解析支付截图，返回 JSON |
 | `validateScreenshot(parsed)` | 验证并修正 AI 返回的数据 |
+| `confirmAndEditEntry(entry)` | 截图记账确认弹窗，支持编辑所有字段 |
 | `generateXLSX(entries, outputPath)` | 从数据生成 XLSX 文件 |
 
 ## 运行模式
@@ -117,12 +118,13 @@ config.runsInWidget?
 ### 截图记账流程 (runScreenshot)
 
 ```
-1. 获取图片 ← args.images / args.shortcutParameter / Pasteboard
-2. AI 解析  ← parseScreenshot() → GLM-4V API
-3. 数据验证 ← validateScreenshot() → 金额/类目/日期校验
-4. 保存 JSON ← loadDataAsync() + saveData()
-5. 生成 XLSX ← generateXLSX() → WebView + SheetJS
-6. 通知结果 ← notify()
+1. 获取图片   ← args.images / args.shortcutParameter / Pasteboard
+2. AI 解析    ← parseScreenshot() → GLM-4V API
+3. 数据验证   ← validateScreenshot() → 金额/类目/日期校验
+4. 确认 & 编辑 ← confirmAndEditEntry() → Alert 弹窗，可修改所有字段
+5. 保存 JSON  ← loadDataAsync() + saveData()
+6. 生成 XLSX  ← generateXLSX() → WebView + SheetJS
+7. 通知结果   ← notify()
 ```
 
 ### XLSX 生成流程 (generateXLSX)
@@ -147,13 +149,15 @@ CDN 加载使用单次 `completion` 回调 + 内部重试，避免多次 `evalua
         传入参数: 截屏结果
 ```
 
+确认/编辑由 Scriptable 内 Alert 弹窗完成，快捷指令无需额外动作。
+
 Back Tap 配置：设置 → 辅助功能 → 触控 → 轻点背面 → 轻点三下 → 选择快捷指令
 
 ## 已知限制
 
 1. **XLSX 生成依赖网络**：首次需要从 CDN 下载 SheetJS 库（~500KB），后续也需要。如果网络不通，JSON 数据已保存但 XLSX 不会更新
 2. **iCloud 同步延迟**：`loadData()` 是同步函数，无法 await iCloud 下载。截图流程使用 `loadDataAsync()` 规避此问题
-3. **AI 解析精度**：依赖 GLM-4V 识别截图，复杂截图可能解析错误，兜底为"其他"类目
+3. **AI 解析精度**：依赖 GLM-4V 识别截图，复杂截图可能解析错误，用户可在确认弹窗中修正
 
 ## 旧版文件（可删除）
 

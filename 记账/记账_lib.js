@@ -491,6 +491,102 @@ function validateScreenshot(parsed) {
   return { amount, type, category, source: parsed.source || "", note: parsed.note || "", date }
 }
 
+// ---------- 截图结果确认 & 编辑 ----------
+async function confirmAndEditEntry(entry) {
+  while (true) {
+    let isExpense = entry.type === "支出"
+    let catOrSrc = isExpense ? (entry.category || "") : (entry.source || "")
+    let label = isExpense ? "类目" : "来源"
+
+    let a = new Alert()
+    a.title = "确认记账信息"
+    a.message = [
+      `类型：${entry.type}`,
+      `${label}：${catOrSrc}`,
+      `日期：${entry.date}`,
+    ].join("\n")
+    a.addTextField("金额", String(entry.amount))
+    a.addTextField("备注", entry.note || "")
+    a.addAction("保存")
+    a.addAction("修改类型")
+    a.addAction(`修改${label}`)
+    a.addAction("修改日期")
+    a.addCancelAction("取消")
+
+    let idx = await a.presentAlert()
+
+    // 始终从文本框更新金额和备注
+    let amountVal = parseFloat(a.textFieldValue(0).replace(/[¥￥元\s,]/g, ""))
+    if (!isNaN(amountVal) && amountVal > 0) entry.amount = amountVal
+    entry.note = a.textFieldValue(1).trim()
+
+    if (idx === -1) return null  // 取消
+    if (idx === 0) return entry  // 保存
+
+    if (idx === 1) {
+      // 切换收支类型
+      if (isExpense) {
+        entry.type = "收入"
+        entry.source = "其他"
+        delete entry.category
+      } else {
+        entry.type = "支出"
+        entry.category = "其他"
+        delete entry.source
+      }
+    } else if (idx === 2) {
+      // 修改类目/来源
+      let options = isExpense ? EXPENSE_CATEGORIES : INCOME_SOURCES
+      let ca = new Alert()
+      ca.title = `选择${label}`
+      for (let opt of options) ca.addAction(opt)
+      ca.addCancelAction("取消")
+      let cIdx = await ca.presentAlert()
+      if (cIdx !== -1) {
+        if (isExpense) entry.category = options[cIdx]
+        else entry.source = options[cIdx]
+      }
+    } else if (idx === 3) {
+      // 修改日期
+      let da = new Alert()
+      da.title = "修改日期"
+      da.addTextField("日期 (YYYY-MM-DD)", entry.date)
+      da.addAction("确认")
+      da.addCancelAction("取消")
+      let dIdx = await da.presentAlert()
+      if (dIdx !== -1) {
+        let newDate = da.textFieldValue(0).trim()
+        if (/^\d{4}-\d{2}-\d{2}$/.test(newDate)) entry.date = newDate
+      }
+    }
+  }
+}
+
+// ---------- 编辑最近一条记录 ----------
+async function editLastEntry(person) {
+  let data = await loadDataAsync()
+  let idx = -1
+  for (let i = data.length - 1; i >= 0; i--) {
+    if (data[i].person === person) { idx = i; break }
+  }
+  if (idx === -1) {
+    await notify("无记录", "没有找到可编辑的记录")
+    return
+  }
+
+  let edited = await confirmAndEditEntry(data[idx])
+  if (!edited) return
+
+  data[idx] = edited
+  saveData(data)
+
+  let xlsxPath = fm.joinPath(dir, XLSX_FILE)
+  await generateXLSX(data, xlsxPath)
+
+  let sign = edited.type === "支出" ? "-" : "+"
+  await notify("已更新 ✓", `${edited.type} ${sign}¥${edited.amount.toFixed(2)}`)
+}
+
 // ---------- 截图记账主流程 ----------
 async function runScreenshot(person) {
   try {
@@ -533,7 +629,7 @@ async function runScreenshot(person) {
     else entry.source = validated.category
     if (note) entry.note = note
 
-    // 5. 保存 JSON（带 await 的异步读取）
+    // 5. 保存 JSON
     let data = await loadDataAsync()
     data.push(entry)
     saveData(data)
@@ -542,11 +638,17 @@ async function runScreenshot(person) {
     let xlsxPath = fm.joinPath(dir, XLSX_FILE)
     await generateXLSX(data, xlsxPath)
 
-    // 7. 通知
+    // 7. 通知（点击可编辑）
     let sign = entry.type === "支出" ? "-" : "+"
     let summary = `${person} ${entry.type} ${sign}¥${entry.amount.toFixed(2)}`
     if (entry.note) summary += `\n${entry.note}`
-    await notify("记账成功 ✓", summary)
+    let scriptName = encodeURIComponent(Script.name())
+    let n = new Notification()
+    n.title = "记账成功 ✓（点击可编辑）"
+    n.body = summary
+    n.sound = "default"
+    n.openURL = `scriptable:///run/${scriptName}?action=edit`
+    await n.schedule()
     Script.setShortcutOutput(summary)
 
   } catch (err) {
@@ -640,5 +742,6 @@ module.exports = {
   recordEntry, pickFromTable,
   showTodaySummary, showMonthlySummary, showRecentRecords,
   exportXLSX, createWidget, runApp,
-  parseScreenshot, validateScreenshot, runScreenshot,
+  parseScreenshot, validateScreenshot, confirmAndEditEntry,
+  editLastEntry, runScreenshot,
 }
